@@ -208,7 +208,7 @@ export const db = {
 
   async deleteUser(userId: number) {
     if (neonPool) {
-      await neonPool.query('DELETE FROM users WHERE id = $2', [userId]);
+      await neonPool.query('DELETE FROM users WHERE id = $1', [userId]);
       return { success: true };
     }
 
