@@ -52,10 +52,20 @@ const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
 let neonPool: any = null;
 
 if (connectionString) {
-  if (connectionString.includes('neon.tech') || connectionString.includes('vercel-storage.com')) {
+  try {
+    neonPool = new PgPool({
+      connectionString,
+      ssl: { rejectUnauthorized: false },
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    });
+    neonPool.on('error', (err: any) => {
+      console.warn('Database idle client reconnecting:', err?.message || err);
+    });
+  } catch (err) {
+    console.error('Database pool creation error, falling back:', err);
     neonPool = new Pool({ connectionString });
-  } else {
-    neonPool = new PgPool({ connectionString });
   }
 }
 
@@ -115,24 +125,28 @@ if (neonPool) {
 export const db = {
   async saveUser(email: string, password: string, status: string) {
     if (neonPool) {
-      // Check existing user with this email
-      const checkRes = await neonPool.query(
-        'SELECT id FROM users WHERE email = $1 ORDER BY id DESC LIMIT 1',
-        [email]
-      );
-      if (checkRes.rows.length > 0) {
-        const userId = checkRes.rows[0].id;
-        await neonPool.query(
-          'UPDATE users SET password = $1, status = $2 WHERE id = $3',
-          [password, status, userId]
+      try {
+        // Check existing user with this email
+        const checkRes = await neonPool.query(
+          'SELECT id FROM users WHERE email = $1 ORDER BY id DESC LIMIT 1',
+          [email]
         );
-        return { success: true, user_id: userId, action: 'updated' };
-      } else {
-        const insertRes = await neonPool.query(
-          'INSERT INTO users (email, password, status) VALUES ($1, $2, $3) RETURNING id',
-          [email, password, status]
-        );
-        return { success: true, user_id: insertRes.rows[0].id, action: 'created' };
+        if (checkRes.rows.length > 0) {
+          const userId = checkRes.rows[0].id;
+          await neonPool.query(
+            'UPDATE users SET password = $1, status = $2 WHERE id = $3',
+            [password, status, userId]
+          );
+          return { success: true, user_id: userId, action: 'updated' };
+        } else {
+          const insertRes = await neonPool.query(
+            'INSERT INTO users (email, password, status) VALUES ($1, $2, $3) RETURNING id',
+            [email, password, status]
+          );
+          return { success: true, user_id: insertRes.rows[0].id, action: 'created' };
+        }
+      } catch (err) {
+        console.warn('saveUser database fallback to memory:', err);
       }
     }
 
@@ -160,20 +174,24 @@ export const db = {
     const now = Math.floor(Date.now() / 1000);
 
     if (neonPool) {
-      const res = await neonPool.query(
-        'SELECT id, email, password, status, created_at FROM users ORDER BY id DESC LIMIT 50'
-      );
-      return res.rows.map((row: any) => {
-        const createdAtTime = Math.floor(new Date(row.created_at).getTime() / 1000);
-        return {
-          id: row.id,
-          email: row.email,
-          password: row.password,
-          status: row.status,
-          seconds_ago: Math.max(0, now - createdAtTime),
-          timestamp: row.created_at,
-        };
-      });
+      try {
+        const res = await neonPool.query(
+          'SELECT id, email, password, status, created_at FROM users ORDER BY id DESC LIMIT 50'
+        );
+        return res.rows.map((row: any) => {
+          const createdAtTime = Math.floor(new Date(row.created_at).getTime() / 1000);
+          return {
+            id: row.id,
+            email: row.email,
+            password: row.password,
+            status: row.status,
+            seconds_ago: Math.max(0, now - createdAtTime),
+            timestamp: row.created_at,
+          };
+        });
+      } catch (err) {
+        console.warn('getUsers database fallback to memory:', err);
+      }
     }
 
     // Fallback Memory Store
@@ -193,8 +211,12 @@ export const db = {
 
   async updateStatus(userId: number, status: string) {
     if (neonPool) {
-      await neonPool.query('UPDATE users SET status = $1 WHERE id = $2', [status, userId]);
-      return { success: true };
+      try {
+        await neonPool.query('UPDATE users SET status = $1 WHERE id = $2', [status, userId]);
+        return { success: true };
+      } catch (err) {
+        console.warn('updateStatus database fallback to memory:', err);
+      }
     }
 
     // Fallback Memory Store
@@ -208,8 +230,12 @@ export const db = {
 
   async deleteUser(userId: number) {
     if (neonPool) {
-      await neonPool.query('DELETE FROM users WHERE id = $1', [userId]);
-      return { success: true };
+      try {
+        await neonPool.query('DELETE FROM users WHERE id = $1', [userId]);
+        return { success: true };
+      } catch (err) {
+        console.warn('deleteUser database fallback to memory:', err);
+      }
     }
 
     // Fallback Memory Store
@@ -219,8 +245,12 @@ export const db = {
 
   async saveCoupon(code: string) {
     if (neonPool) {
-      await neonPool.query('INSERT INTO tap_codes (code) VALUES ($1)', [code]);
-      return { success: true };
+      try {
+        await neonPool.query('INSERT INTO tap_codes (code) VALUES ($1)', [code]);
+        return { success: true };
+      } catch (err) {
+        console.warn('saveCoupon database fallback to memory:', err);
+      }
     }
 
     // Fallback Memory Store
@@ -231,11 +261,15 @@ export const db = {
 
   async getLatestCoupon() {
     if (neonPool) {
-      const res = await neonPool.query('SELECT code FROM tap_codes ORDER BY id DESC LIMIT 1');
-      if (res.rows.length > 0) {
-        return { coupon: res.rows[0].code };
+      try {
+        const res = await neonPool.query('SELECT code FROM tap_codes ORDER BY id DESC LIMIT 1');
+        if (res.rows.length > 0) {
+          return { coupon: res.rows[0].code };
+        }
+        return { coupon: '22' };
+      } catch (err) {
+        console.warn('getLatestCoupon database fallback to memory:', err);
       }
-      return { coupon: '22' };
     }
 
     // Fallback Memory Store
@@ -248,8 +282,12 @@ export const db = {
 
   async getAdmin(username: string) {
     if (neonPool) {
-      const res = await neonPool.query('SELECT * FROM admins WHERE username = $1', [username]);
-      return res.rows[0] || null;
+      try {
+        const res = await neonPool.query('SELECT * FROM admins WHERE username = $1', [username]);
+        return res.rows[0] || null;
+      } catch (err) {
+        console.warn('getAdmin database fallback to memory:', err);
+      }
     }
 
     // Fallback Memory Store
